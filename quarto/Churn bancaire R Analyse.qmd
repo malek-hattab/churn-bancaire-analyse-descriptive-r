@@ -1,0 +1,239 @@
+---
+title: "Analyse statistique descriptive du churn client bancaire"
+subtitle: "Approche descriptive fondée sur une logique métier bancaire"
+author: "Malek Hattab"
+date: "2026-01-02"
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    transition: fade
+    center: true
+    width: 1280
+    height: 720
+execute:
+  echo: true
+  warning: false
+  message: false
+code-fold: true
+code-summary: "Afficher le code"
+engine: knitr
+---
+
+```{r setup, include=FALSE}
+.libPaths(c("C:/Rlibs", .libPaths()))
+library(tidyverse)
+library(readxl)
+library(lubridate)
+
+# Importation des données
+path <- "data/CHURN.ANALYSIS.xlsx"
+customers <- read_excel(path, sheet = "CUSTOMERS")
+accounts  <- read_excel(path, sheet = "ACCOUNTS")
+balances  <- read_excel(path, sheet = "BALANCES")
+```
+
+## Introduction
+
+Le churn client correspond à la perte d’un client lorsque l’ensemble de ses comptes bancaires sont fermés.
+
+Dans le secteur bancaire, la compréhension des mécanismes de churn constitue un enjeu stratégique majeur, notamment pour orienter les actions de rétention et d’amélioration de la relation client.
+
+
+## Objectif du travail
+
+- Construire un jeu de données client fiable  
+- Réaliser une analyse statistique **descriptive et comparative** du churn  
+- Approche **strictement non prédictive**
+
+## Données utilisées
+
+- **CUSTOMERS** : informations clients  
+- **ACCOUNTS** : comptes bancaires  
+- **BALANCES** : soldes financiers  
+
+Les données proviennent de différentes tables d’un même système d’information bancaire et présentent des relations de type client–comptes, nécessitant un traitement spécifique.
+
+
+## Fusion brute (diagnostic)
+
+```{r fusion-brute}
+data_fused <- customers %>%
+  left_join(accounts, by = c("Customer", "Account")) %>%
+  left_join(balances, by = c("Customer", "Account"))
+
+dim(data_fused)
+```
+
+Cette fusion est volontairement brute afin de mettre en évidence les duplications, les valeurs manquantes et les incohérences structurelles avant toute phase de nettoyage ou d’agrégation.
+
+
+## Nettoyage : types & valeurs manquantes
+
+```{r nettoyage}
+data_clean <- data_fused %>%
+  mutate(
+    DATE_OF_BIRTH = ymd(DATE_OF_BIRTH),
+    CUSTOMER_SINCE = ymd(CUSTOMER_SINCE),
+    WORKING_BALANCE = as.numeric(WORKING_BALANCE),
+    KYC_COMPLETE = if_else(is.na(KYC_COMPLETE), "UNKNOWN", KYC_COMPLETE),
+    ACCOUNT_TYPE = if_else(is.na(ACCOUNT_TYPE), "UNKNOWN", ACCOUNT_TYPE),
+    CURRENCY = if_else(is.na(CURRENCY), "UNKNOWN", CURRENCY),
+    STATUS = if_else(is.na(STATUS), "UNKNOWN", STATUS),
+    CATEGORY = if_else(is.na(CATEGORY), 0, CATEGORY)
+  )
+```
+
+Le traitement des valeurs manquantes repose sur une logique métier bancaire, visant à conserver l’information tout en assurant la cohérence analytique du jeu de données.
+
+
+## Variables analytiques & valeurs aberrantes
+
+```{r variables-analytiques}
+data_clean <- data_clean %>%
+  mutate(
+    age = as.numeric(interval(DATE_OF_BIRTH, Sys.Date()) / years(1)),
+    seniority_years = as.numeric(interval(CUSTOMER_SINCE, Sys.Date()) / years(1)),
+    age = if_else(age < 18 | age > 100, NA_real_, age)
+  )
+```
+
+Les variables âge et ancienneté sont calculées à partir de la date courante, conformément à l’approche adoptée dans le notebook de référence.
+
+## Agrégation au niveau client
+
+```{r aggregation}
+client_data <- data_clean %>%
+  group_by(Customer) %>%
+  summarise(
+    age = first(age),
+    seniority_years = first(seniority_years),
+    active_accounts = sum(STATUS == "Active"),
+    mean_balance = mean(WORKING_BALANCE, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+Le solde moyen est utilisé comme indicateur synthétique du comportement financier du client.
+
+
+
+
+## Définition du churn
+
+```{r definition-churn}
+client_data <- client_data %>%
+  mutate(churn = if_else(active_accounts == 0, 1, 0))
+
+table(client_data$churn)
+```
+
+Un client est considéré comme churné lorsqu’il ne détient plus aucun compte actif.
+
+
+
+## Histogramme : âge (global)
+
+```{r histogramme-age}
+ggplot(client_data, aes(x = age)) +
+  geom_histogram(bins = 30, fill = "#2C7FB8", color = "white", na.rm = TRUE) +
+  labs(title = "Distribution de l'âge des clients", x = "Âge", y = "Effectif") +
+  theme_minimal()
+```
+
+La distribution de l’âge met en évidence une clientèle majoritairement concentrée entre 30 et 60 ans, caractéristique d’une population bancaire active.
+
+
+## Histogramme clé : solde moyen selon churn 
+
+```{r histogramme-solde}
+ggplot(client_data, aes(x = mean_balance, fill = factor(churn))) +
+  geom_histogram(bins = 30, alpha = 0.6, na.rm = TRUE, position = "identity") +
+  labs(
+    title = "Distribution du solde moyen selon le statut de churn",
+    x = "Solde moyen",
+    y = "Effectif",
+    fill = "Churn"
+  ) +
+  scale_fill_manual(values = c("0" = "#2C7FB8", "1" = "#E74C3C"),
+                    labels = c("Non churner", "Churner")) +
+  theme_minimal()
+```
+
+Les deux distributions présentent une forte concentration autour de soldes proches de zéro, suggérant des profils financiers globalement comparables entre churners et non-churners.
+
+
+
+
+## Boxplot : solde moyen (95 %)
+
+```{r boxplot-solde}
+q95 <- quantile(client_data$mean_balance, 0.95, na.rm = TRUE)
+
+client_data %>%
+  filter(mean_balance <= q95) %>%
+  ggplot(aes(y = mean_balance)) +
+  geom_boxplot(fill = "steelblue") +
+  labs(
+    title = "Distribution du solde moyen (95 % des clients)",
+    y = "Solde moyen",
+    x = ""
+  ) +
+  theme_minimal()
+```
+
+La limitation de l’analyse aux 95 % des clients permet de neutraliser l’effet des valeurs extrêmes et met en évidence une dispersion des soldes moyens globalement comparable entre les groupes.
+
+
+## Comparaison âge selon churn 
+
+```{r boxplot-age-churn}
+ggplot(client_data, aes(x = factor(churn), y = age, fill = factor(churn))) +
+  geom_boxplot(alpha = 0.7, na.rm = TRUE) +
+  labs(
+    title = "Comparaison de l'âge selon le churn",
+    x = "Statut de churn",
+    y = "Âge",
+    fill = "Churn"
+  ) +
+  scale_fill_manual(values = c("0" = "#2C7FB8", "1" = "#E74C3C"),
+                    labels = c("Non churner", "Churner")) +
+  theme_minimal()
+```
+
+Les churners apparaissent légèrement plus jeunes en médiane, bien que les distributions se recouvrent largement, ce qui traduit une différence modérée.
+
+## Validation statistique
+
+- Normalité non vérifiée  
+- Utilisation de tests **non paramétriques (Wilcoxon)**  
+- Objectif : **confirmer les différences observées**, sans prédiction
+
+## Résultat des comparaisons
+
+```{r comparaisons}
+client_data %>%
+  group_by(churn) %>%
+  summarise(
+    age_mean = mean(age, na.rm = TRUE),
+    seniority_mean = mean(seniority_years, na.rm = TRUE),
+    balance_mean = mean(mean_balance, na.rm = TRUE),
+    n_clients = n(),
+    .groups = "drop"
+  )
+```
+
+## Conclusion
+
+- Des différences existent entre churners et non-churners  
+- L’âge, l’ancienneté et le solde moyen présentent des différences modérées entre les groupes.
+  
+
+
+## Perspectives
+
+- Intégration de variables comportementales  
+- Analyse temporelle de l'évolution des soldes  
+- Extension possible vers une analyse descriptive longitudinale ou segmentée.
+
+
