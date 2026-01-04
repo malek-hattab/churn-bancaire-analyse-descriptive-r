@@ -1,1 +1,1 @@
-Jeu de données utilisé pour l’analyse.
+Le fichier de données est volumineux et peut être fourni sur demande.
